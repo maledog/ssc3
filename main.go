@@ -184,12 +184,13 @@ func main() {
 	ch_live_stop := make(chan bool, 1)
 	signal.Notify(ch_os_signals, os.Interrupt, os.Kill, syscall.SIGTERM)
 	ch_input := make(chan Message, 100)
-	ch_in := make(chan Data_value, cnf.Sensor_server.Row_limit)
-	ch_data := make(chan Data_value, 100)
+	ch_in := make(chan Data_value, cnf.Sensor_server.Row_limit*2)
+	ch_data := make(chan Data_value, cnf.Sensor_server.Row_limit*2)
 	go db_logger(db, ch_data, ch_db_logger_close, cnf.Db.Debug)
 	go worker(cnf, ch_input, ch_data, ch_in, ch_live_stop, ch_worker_close)
 	go sender(cnf, ch_in, ch_data, ch_sender_close)
 	go arch_sender(db, cnf, ch_in, ch_live_stop, ch_arch_sender_close)
+	go db_cleaner(db, cnf)
 	connected := false
 	for !connected {
 		go start_mqtt_client(cnf, ch_input, ch_mqtt_close, ch_mqtt_error)
