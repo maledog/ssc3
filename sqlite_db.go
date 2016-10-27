@@ -38,15 +38,6 @@ func init_db(db_file string) error {
 	return nil
 }
 
-func add_row_trigger(db *sql.DB, row_limit int) error {
-	sql_query := fmt.Sprintf("DROP TRIGGER IF EXISTS last_n_rows_only;\nCREATE TRIGGER last_n_rows_only AFTER INSERT ON data\nBEGIN\nDELETE FROM data WHERE id NOT IN (SELECT id FROM data ORDER BY id DESC LIMIT '%d');\nEND;", row_limit)
-	_, err := db.Exec(sql_query)
-	if err != nil {
-		return err
-	}
-	return nil
-}
-
 func get_config(f_cnf F_Config) (cnf Config, err error) {
 	cnf.Log = f_cnf.Log
 	cnf.MQTT_options = f_cnf.MQTT_options
@@ -85,10 +76,6 @@ func get_config(f_cnf F_Config) (cnf Config, err error) {
 		ch.Id = int(id)
 		cnf.Channels = append(cnf.Channels, ch)
 	}
-	err = add_row_trigger(db, cnf.Db.Db_max_row)
-	if err != nil {
-		return
-	}
 	return cnf, nil
 }
 
@@ -97,7 +84,7 @@ func open_sqlite(db_file string) (*sql.DB, error) {
 }
 
 func db_logger(db *sql.DB, ch_data chan Data_value, ch_db_logger_close chan struct{}, debug bool) {
-	ci := 0
+	var updates []int
 	for {
 		select {
 		case <-ch_db_logger_close:
@@ -121,16 +108,35 @@ func db_logger(db *sql.DB, ch_data chan Data_value, ch_db_logger_close chan stru
 					if debug {
 						log.Printf("DB_LOGGER_ARCH: time:%s, id:%d\n", data.Timestamp.Format("2006-01-02 15:04:05"), data.Id)
 					}
-					if len(update) < 100 {
-						update = append(update, data.Id)
-					} else {
-						update = []int{}
-					}
-					sql_query := "UPDATE data SET sent = 1 WHERE id IN ?;"
-					_, err := db.Exec(sql_query, data.Id)
-					if err != nil {
-						log.Println(err)
+					if len(updates) < 100 {
+						updates = append(updates, data.Id)
 						continue
+					} else {
+						tx, err := db.Begin()
+						if err != nil {
+							log.Println(err)
+							continue
+						}
+						stmt, err := tx.Prepare("UPDATE data SET sent = 1 WHERE id = ?;")
+						if err != nil {
+							log.Println(err)
+							continue
+						}
+						defer stmt.Close()
+						for _, id := range updates {
+							_, err := stmt.Exec(id)
+							if err != nil {
+								stmt.Close()
+								log.Println(err)
+								break
+							}
+						}
+						updates = []int{}
+						err = tx.Commit()
+						if err != nil {
+							log.Println(err)
+							continue
+						}
 					}
 				}
 			}
@@ -202,6 +208,19 @@ func arch_sender(db *sql.DB, cnf Config, ch_in chan Data_value, ch_live_stop cha
 				default:
 				}
 			}
+		}
+	}
+	return
+}
+
+func db_cleaner(db *sql.DB, cnf Config) {
+	ticker := time.NewTicker(10 * time.Minute)
+	for {
+		<-ticker.C
+		_, err := db.Exec("DELETE FROM data WHERE id NOT IN (SELECT id FROM data ORDER BY id DESC LIMIT ?);", cnf.Db.Db_max_row)
+		if err != nil {
+			log.Println(err)
+			continue
 		}
 	}
 	return
