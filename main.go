@@ -17,6 +17,8 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/maledog/logrot"
+
 	MQTT "github.com/eclipse/paho.mqtt.golang"
 	"github.com/kardianos/osext"
 )
@@ -160,7 +162,7 @@ func main() {
 		}
 	}
 	if cnf.Log != "" {
-		f, err := os.OpenFile(cnf.Log, os.O_RDWR|os.O_CREATE|os.O_APPEND, 0666)
+		f, err := logrot.Open(cnf.Log, 0644, 10*1024*1024, 10)
 		if err != nil {
 			log.Println(err)
 			os.Exit(1)
@@ -188,7 +190,7 @@ func main() {
 	ch_data := make(chan Data_value, cnf.Sensor_server.Row_limit*2)
 	go db_logger(db, ch_data, ch_db_logger_close, cnf.Db.Debug)
 	go worker(cnf, ch_input, ch_data, ch_in, ch_live_stop, ch_worker_close)
-	go sender(cnf, ch_in, ch_data, ch_sender_close)
+	go tcp_client_wrapper(cnf, ch_in, ch_data, ch_sender_close)
 	go arch_sender(db, cnf, ch_in, ch_live_stop, ch_arch_sender_close)
 	go db_cleaner(db, cnf)
 	connected := false
@@ -324,6 +326,91 @@ func worker(cnf Config, ch_input chan Message, ch_data chan Data_value, ch_in ch
 		}
 	}
 	return
+}
+
+func tcp_client_wrapper(cnf Config, ch_in chan Data_value, ch_data chan Data_value, ch_sender_close chan struct{}) {
+	ch_tcp_client_close := make(chan struct{}, 1)
+	for {
+		select {
+		case <-ch_sender_close:
+			ch_tcp_client_close <- struct{}{}
+			break
+		default:
+			{
+				err := tcp_client(cnf, ch_in, ch_data, ch_tcp_client_close)
+				if err != nil {
+					log.Printf("TCP:%v.\n", err)
+					log.Printf("TCP:Client disconnected.\n")
+					log.Printf("TCP:Next connect in 30 second.\n")
+					time.Sleep(30 * time.Second)
+				}
+			}
+		}
+	}
+}
+
+func tcp_client(cnf Config, ch_in chan Data_value, ch_data chan Data_value, ch_tcp_client_close chan struct{}) error {
+	chs := make(map[int]int)
+	for _, channel := range cnf.Channels {
+		chs[channel.Id] = channel.Out_id
+	}
+	log.Printf("SENSER: Connecting to %s\n", cnf.Sensor_server.Host)
+	conn, err := net.DialTimeout("tcp4", cnf.Sensor_server.Host, cnf.Sensor_server.Tcp_timeout)
+	if err != nil {
+		return err
+	}
+	log.Printf("SENSER: The connection to %s established.\n", cnf.Sensor_server.Host)
+	defer conn.Close()
+	reader := bufio.NewReader(conn)
+	writer := bufio.NewWriter(conn)
+	for {
+		select {
+		case <-ch_tcp_client_close:
+			{
+				return nil
+			}
+		default:
+			{
+				data := <-ch_in
+				var out_str string
+				if data.Live {
+					out_str = fmt.Sprintf("#id:%d;datetime:%s;saving_interval:%d;live:1;t%d:%.2f#", cnf.Sensor_server.Client_id, data.Timestamp.UTC().Format("20060102150405"), int(cnf.Sensor_server.Sending_interval.Seconds()), chs[data.C_id], to_fixed(data.Value, 2))
+				} else {
+					out_str = fmt.Sprintf("#id:%d;datetime:%s;saving_interval:%d;live:0;t%d:%.2f#", cnf.Sensor_server.Client_id, data.Timestamp.UTC().Format("20060102150405"), int(cnf.Sensor_server.Sending_interval.Seconds()), chs[data.C_id], to_fixed(data.Value, 2))
+				}
+				conn.SetDeadline(time.Now().Add(cnf.Sensor_server.Tcp_timeout))
+				resp, err := send_sensor(reader, writer, out_str)
+				if err != nil {
+					return err
+				} else {
+					switch resp {
+					case "@OK\r\n":
+						{
+							if !data.Live {
+								select {
+								case ch_data <- data:
+								default:
+								}
+							}
+						}
+					case "@FAIL\r\n":
+					default:
+						log.Println("unknown resp:", resp)
+					}
+					if cnf.Sensor_server.Debug {
+						debug_str := strings.Replace(strings.Replace(resp, "\r", "<CR>", -1), "\n", "<LF>", -1)
+						if data.Live {
+							log.Printf("SENDER_LIVE: %s, response:%q\n", out_str, debug_str)
+						} else {
+							log.Printf("SENDER_ARCH: %s, response:%q\n", out_str, debug_str)
+						}
+					}
+				}
+				time.Sleep(cnf.Sensor_server.Min_row_interval_ms)
+			}
+		}
+	}
+	return nil
 }
 
 func sender(cnf Config, ch_in chan Data_value, ch_data chan Data_value, ch_sender_close chan struct{}) {
