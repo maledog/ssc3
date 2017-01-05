@@ -9,4 +9,5 @@ Sensor Scada Client (ssc3) reads data from mqtt-topics [Wirenboard](https://gith
 github.com/eclipse/paho.mqtt.golang
 github.com/kardianos/osext
 github.com/mattn/go-sqlite3
+github.com/maledog/logrot
 ```
