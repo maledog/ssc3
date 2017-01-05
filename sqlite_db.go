@@ -199,7 +199,7 @@ func arch_sender(db *sql.DB, cnf Config, ch_in chan Data_value, ch_live_stop cha
 					default:
 					}
 				}
-				time.Sleep(time.Duration(len(out_data)*2) * cnf.Sensor_server.Min_row_interval_ms)
+				time.Sleep(time.Duration(5) * cnf.Sensor_server.Min_row_interval_ms)
 				select {
 				case ch_live_stop <- false:
 					{
