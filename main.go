@@ -17,76 +17,70 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/maledog/logrot"
-
-	MQTT "github.com/eclipse/paho.mqtt.golang"
 	"github.com/kardianos/osext"
+	"github.com/maledog/logrot"
+	"github.com/yosssi/gmq/mqtt"
+	"github.com/yosssi/gmq/mqtt/client"
 )
 
-type F_Config struct {
-	Log           string          `json:"log"`
-	Dd            Sqlite_options  `json:"db"`
-	Channels      []F_Channel     `json:"channels"`
-	Sensor_server F_Sensor_server `json:"sensor_server"`
-	MQTT_options  MQTT_options    `json:"mqtt_options"`
-}
-
-type F_Sensor_server struct {
-	Debug               bool   `json:"debug"`
-	Sending_interval    int    `json:"sending_interval"`
-	Client_id           int    `json:"client_id"`
-	Host                string `json:"host"`
-	Tcp_timeout         int    `json:"tcp_timeout"`
-	Row_limit           int    `json:"row_limit"`
-	Min_row_interval_ms int    `json:"min_row_interval_ms"`
-}
-
-type F_Channel struct {
-	Id              int    `json:"-"`
-	Out_id          int    `json:"out_id"`
-	Sub             string `json:"subscribe"`
-	Saving_interval int    `json:"saving_interval"`
-}
-
 type Config struct {
-	Log           string
-	Db            Sqlite_options
-	Channels      []Channel
-	Sensor_server Sensor_server
-	MQTT_options  MQTT_options
+	Log            Log            `json:"log"`
+	Debug_mqtt     bool           `json:"debug_mqtt"`
+	Debug_database bool           `json:"debug_database"`
+	Debug_tcp      bool           `json:"debug_tcp"`
+	Db             Sqlite_options `json:"db"`
+	Channels       []Channel      `json:"channels"`
+	Sensor_server  Sensor_server  `json:"sensor_server"`
+	MQTT_options   MQTT_options   `json:"mqtt_options"`
 }
 
 type Sensor_server struct {
-	Debug               bool
-	Sending_interval    time.Duration
-	Client_id           int
-	Host                string
-	Tcp_timeout         time.Duration
-	Row_limit           int
-	Min_row_interval_ms time.Duration
+	Sending_interval_f string        `json:"sending_interval"`
+	Sending_interval   time.Duration `json:"-"`
+	Host               string        `json:"host"`
+	Client_id          int           `json:"client_id"`
+	Tcp_timeout_f      string        `json:"tcp_timeout"`
+	Tcp_timeout        time.Duration `json:"-"`
+	Row_limit          int           `json:"row_limit"`
+	Min_row_interval_f string        `json:"min_row_interval"`
+	Min_row_interval   time.Duration `json:"-"`
 }
 
 type Channel struct {
-	Id              int
-	Out_id          int
-	Sub             string
-	Saving_interval time.Duration
+	Id                int           `json:"-"`
+	Out_id            int           `json:"out_id"`
+	Sub               string        `json:"subscribe"`
+	Saving_interval_f string        `json:"saving_interval"`
+	Saving_interval   time.Duration `json:"-"`
+}
+
+type Log struct {
+	File      string `json:"file"`
+	Max_size  int64  `json:"max_size"`
+	Max_files int    `json:"max_files"`
 }
 
 type Sqlite_options struct {
-	Debug      bool   `json:"debug"`
 	Db_file    string `json:"db_file"`
 	Db_max_row int    `json:"db_max_row"`
 }
 
 type MQTT_options struct {
-	Debug    bool   `json:"debug"`
-	Host     string `json:"host"`
-	User     string `json:"user"`
-	Password string `json:"password"`
+	Proto       string        `json:"proto"`
+	Host        string        `json:"host"`
+	User        string        `json:"user"`
+	Password    string        `json:"password"`
+	Client_id   string        `json:"client_id"`
+	Reconnect_f string        `json:"reconnect"`
+	Reconnect   time.Duration `json:"-"`
 }
 
 type Message struct {
+	Topic string
+	Value []byte
+}
+
+type MQTT_data struct {
 	Topic string
 	Value []byte
 }
@@ -107,20 +101,20 @@ func main() {
 		os.Exit(1)
 	}
 	var in_config string
-	var make_config bool
+	var mc bool
 	var mkdb bool
-	var ds bool
+	var dt bool
 	var dl bool
 	var dm bool
 	flag.StringVar(&in_config, "c", exe_dir+"/config.json", "config file")
-	flag.BoolVar(&make_config, "m", false, "make config file")
+	flag.BoolVar(&mc, "m", false, "make config file")
 	flag.BoolVar(&mkdb, "mkdb", false, "make new db_file")
-	flag.BoolVar(&ds, "ds", false, "debug sender stdout")
+	flag.BoolVar(&dt, "dt", false, "debug tcp_client stdout")
 	flag.BoolVar(&dl, "dl", false, "debug database logger stdout")
 	flag.BoolVar(&dm, "dm", false, "debug mqtt stdout")
 	flag.Parse()
-	if make_config {
-		cf, err := make_f_config(in_config)
+	if mc {
+		cf, err := make_config(in_config)
 		if err != nil {
 			log.Println(err)
 			os.Exit(1)
@@ -129,40 +123,40 @@ func main() {
 			os.Exit(0)
 		}
 	}
-	f_cnf, err := get_f_config(in_config)
+	cnf, err := get_config(in_config)
 	if err != nil {
 		log.Println(err)
 		os.Exit(1)
 	}
 	if mkdb {
-		err := init_db(f_cnf.Dd.Db_file)
+		err := init_db(cnf.Db.Db_file)
 		if err != nil {
 			log.Println(err)
 			os.Exit(1)
 		} else {
-			log.Printf("Init db_file:%s OK.\n", f_cnf.Dd.Db_file)
+			log.Printf("Init db_file:%s OK.\n", cnf.Db.Db_file)
 			os.Exit(0)
 		}
 	}
-	cnf, err := get_config(f_cnf)
+	err = cnf.Parse_time()
 	if err != nil {
 		log.Println(err)
 		os.Exit(1)
 	}
-	if dm || dl || ds {
-		cnf.Log = ""
+	if dm || dl || dt {
+		cnf.Log.File = ""
 		if dm {
-			cnf.MQTT_options.Debug = true
+			cnf.Debug_mqtt = true
 		}
-		if ds {
-			cnf.Sensor_server.Debug = true
+		if dt {
+			cnf.Debug_tcp = true
 		}
 		if dl {
-			cnf.Db.Debug = true
+			cnf.Debug_database = true
 		}
 	}
-	if cnf.Log != "" {
-		f, err := logrot.Open(cnf.Log, 0644, 10*1024*1024, 10)
+	if cnf.Log.File != "" {
+		f, err := logrot.Open(cnf.Log.File, 0644, cnf.Log.Max_size, cnf.Log.Max_files)
 		if err != nil {
 			log.Println(err)
 			os.Exit(1)
@@ -182,26 +176,17 @@ func main() {
 	ch_db_logger_close := make(chan struct{}, 1)
 	ch_sender_close := make(chan struct{}, 1)
 	ch_arch_sender_close := make(chan struct{}, 1)
-	ch_mqtt_error := make(chan bool, 1)
 	ch_live_stop := make(chan bool, 1)
 	signal.Notify(ch_os_signals, os.Interrupt, os.Kill, syscall.SIGTERM)
-	ch_input := make(chan Message, 100)
+	ch_input := make(chan MQTT_data, 100)
 	ch_in := make(chan Data_value, cnf.Sensor_server.Row_limit*2)
 	ch_data := make(chan Data_value, cnf.Sensor_server.Row_limit*2)
-	go db_logger(db, ch_data, ch_db_logger_close, cnf.Db.Debug)
+	go db_logger(db, ch_data, ch_db_logger_close, cnf.Debug_database)
 	go worker(cnf, ch_input, ch_data, ch_in, ch_live_stop, ch_worker_close)
 	go tcp_client_wrapper(cnf, ch_in, ch_data, ch_sender_close)
 	go arch_sender(db, cnf, ch_in, ch_live_stop, ch_arch_sender_close)
 	go db_cleaner(db, cnf)
-	connected := false
-	for !connected {
-		go start_mqtt_client(cnf, ch_input, ch_mqtt_close, ch_mqtt_error)
-		connected = <-ch_mqtt_error
-		if !connected {
-			ch_mqtt_close <- struct{}{}
-			time.Sleep(1 * time.Minute)
-		}
-	}
+	go mqtt_client_wrapper(cnf, ch_input, ch_mqtt_close)
 
 	<-ch_os_signals
 	log.Println("Interrupted program.")
@@ -212,62 +197,87 @@ func main() {
 	ch_sender_close <- struct{}{}
 }
 
-func start_mqtt_client(cnf Config, ch_input chan Message, ch_mqtt_close chan struct{}, ch_mqtt_error chan bool) {
-	var conn_opts MQTT.ClientOptions
-	conn_opts.AddBroker(cnf.MQTT_options.Host)
-	conn_opts.SetUsername(cnf.MQTT_options.User)
-	conn_opts.SetPassword(cnf.MQTT_options.Password)
-	conn_opts.SetClientID("sensor_mqtt_serial")
-	conn_opts.SetCleanSession(true)
-	conn_opts.SetAutoReconnect(true)
-	conn_opts.SetMaxReconnectInterval(1 * time.Minute)
-	//conn_opts.SetKeepAlive(30 * time.Second)
-	conn_opts.OnConnect = func(c MQTT.Client) {
-		for i := 0; i < len(cnf.Channels); i++ {
-			topic := cnf.Channels[i].Sub
-			log.Printf("Subscribe to topic:%s\n", topic)
-			if token := c.Subscribe(topic, byte(0), func(client MQTT.Client, message MQTT.Message) {
-				var in_mess Message
-				in_mess.Topic = message.Topic()
-				in_mess.Value = message.Payload()
-				if cnf.MQTT_options.Debug {
-					log.Println("MQTT:", message.Topic(), string(message.Payload()))
+func mqtt_client_wrapper(cnf Config, ch_input chan MQTT_data, ch_mqtt_close chan struct{}) {
+	ch_mqtt_client_close := make(chan struct{}, 1)
+	for {
+		select {
+		case <-ch_mqtt_close:
+			ch_mqtt_client_close <- struct{}{}
+			break
+		default:
+			{
+				err := mqtt_client(cnf, ch_input, ch_mqtt_client_close)
+				if err != nil {
+					log.Printf("MQTT:ERROR:%v.\n", err)
 				}
-				select {
-				case ch_input <- in_mess:
-				default:
-				}
-			}); token.Wait() && token.Error() != nil {
-				log.Println("Mqtt subscribe error:", token.Error())
+				log.Printf("MQTT:Next connect in %s.\n", cnf.MQTT_options.Reconnect.String())
+				time.Sleep(cnf.MQTT_options.Reconnect)
 			}
 		}
 	}
-	conn_opts.OnConnectionLost = func(c MQTT.Client, err error) {
-		log.Println("Mqtt connection lost, error:", err)
-	}
-	client := MQTT.NewClient(&conn_opts)
-	if token := client.Connect(); token.Wait() && token.Error() != nil {
-		log.Println("Mqtt connection error:", token.Error())
-		ch_mqtt_error <- false
-	} else {
-		log.Printf("Connected to %s\n", cnf.MQTT_options.Host)
-		ch_mqtt_error <- true
-	}
-
-	defer func() {
-		if client.IsConnected() {
-			client.Disconnect(1)
-		}
-	}()
-	<-ch_mqtt_close
-	return
 }
 
-func worker(cnf Config, ch_input chan Message, ch_data chan Data_value, ch_in chan Data_value, ch_live_stop chan bool, ch_worker_close chan struct{}) {
+func mqtt_client(cnf Config, ch_input chan MQTT_data, ch_mqtt_client_close chan struct{}) error {
+	ch_mqtt_error := make(chan error, 1)
+	var opts client.Options
+	opts.ErrorHandler = func(err error) {
+		ch_mqtt_error <- err
+	}
+	var conn_opts client.ConnectOptions
+	conn_opts.Network = cnf.MQTT_options.Proto
+	conn_opts.Address = cnf.MQTT_options.Host
+	conn_opts.ClientID = []byte(cnf.MQTT_options.Client_id)
+	conn_opts.CleanSession = true
+	conn_opts.UserName = []byte(cnf.MQTT_options.User)
+	conn_opts.Password = []byte(cnf.MQTT_options.Password)
+	conn_opts.KeepAlive = 30
+	var sr client.SubscribeOptions
+	for i := 0; i < len(cnf.Channels); i++ {
+		topic := cnf.Channels[i].Sub
+		log.Printf("MQTT:Subscribe to %q.\n", topic)
+		var r client.SubReq
+		r.TopicFilter = []byte(topic)
+		r.QoS = mqtt.QoS0
+		r.Handler = func(topic, message []byte) {
+			var in_mess MQTT_data
+			in_mess.Topic = string(topic)
+			in_mess.Value = message
+			if cnf.Debug_mqtt {
+				log.Printf("MQTT:DEBUG:%q %q.\n", in_mess.Topic, string(message))
+			}
+			select {
+			case ch_input <- in_mess:
+			default:
+			}
+		}
+		sr.SubReqs = append(sr.SubReqs, &r)
+	}
+	cli := client.New(&opts)
+	err := cli.Connect(&conn_opts)
+	if err != nil {
+		return err
+	}
+	log.Printf("MQTT:Connected to %s.\n", cnf.MQTT_options.Host)
+	defer cli.Terminate()
+	err = cli.Subscribe(&sr)
+	if err != nil {
+		return err
+	}
+	select {
+	case <-ch_mqtt_client_close:
+		err := cli.Disconnect()
+		log.Printf("MQTT:Client disconnected.\n")
+		return err
+	case err := <-ch_mqtt_error:
+		return err
+	}
+}
+
+func worker(cnf Config, ch_input chan MQTT_data, ch_data chan Data_value, ch_in chan Data_value, ch_live_stop chan bool, ch_worker_close chan struct{}) {
 	live_stop := false
 	radiator_arch := make(map[string]time.Time)
 	radiator_live := make(map[string]time.Time)
-	live_interval := time.Duration(len(cnf.Channels)) * cnf.Sensor_server.Min_row_interval_ms
+	live_interval := time.Duration(len(cnf.Channels)) * cnf.Sensor_server.Min_row_interval
 	ch_ids := make(map[string]int)
 	ch_intervals := make(map[string]time.Duration)
 	for _, channel := range cnf.Channels {
@@ -397,7 +407,7 @@ func tcp_client(cnf Config, ch_in chan Data_value, ch_data chan Data_value, ch_t
 					default:
 						log.Println("unknown resp:", resp)
 					}
-					if cnf.Sensor_server.Debug {
+					if cnf.Debug_tcp {
 						debug_str := strings.Replace(strings.Replace(resp, "\r", "<CR>", -1), "\n", "<LF>", -1)
 						if data.Live {
 							log.Printf("SENDER_LIVE: %s, response:%q\n", out_str, debug_str)
@@ -406,7 +416,7 @@ func tcp_client(cnf Config, ch_in chan Data_value, ch_data chan Data_value, ch_t
 						}
 					}
 				}
-				time.Sleep(cnf.Sensor_server.Min_row_interval_ms)
+				time.Sleep(cnf.Sensor_server.Min_row_interval)
 			}
 		}
 	}
@@ -427,7 +437,7 @@ func send_sensor(reader *bufio.Reader, writer *bufio.Writer, out_str string) (st
 	return string(buf[:n]), err
 }
 
-func get_f_config(cf string) (cnf F_Config, err error) {
+func get_config(cf string) (cnf Config, err error) {
 	data, err := ioutil.ReadFile(cf)
 	if err != nil {
 		return
@@ -436,31 +446,36 @@ func get_f_config(cf string) (cnf F_Config, err error) {
 	return
 }
 
-func make_f_config(cf string) (string, error) {
-	var cnf F_Config
-	var channel F_Channel
-	cnf.Log = "logs/ssc3.log"
-	cnf.Dd.Debug = false
-	cnf.Dd.Db_file = "db/ssc3.sqlite"
-	cnf.Dd.Db_max_row = 100000
-	cnf.Sensor_server.Debug = false
+func make_config(cf string) (string, error) {
+	var cnf Config
+	var channel Channel
+	cnf.Log.File = "logs/ssc3.log"
+	cnf.Log.Max_size = 10 * 1024 * 1024
+	cnf.Log.Max_files = 10
+	cnf.Debug_mqtt = false
+	cnf.Debug_database = false
+	cnf.Debug_tcp = false
+	cnf.Db.Db_file = "db/ssc3.sqlite"
+	cnf.Db.Db_max_row = 100000
 	cnf.Sensor_server.Host = "127.0.0.1:7115"
 	cnf.Sensor_server.Client_id = 0
-	cnf.Sensor_server.Sending_interval = 300
+	cnf.Sensor_server.Sending_interval_f = "300s"
 	cnf.Sensor_server.Row_limit = 500
-	cnf.Sensor_server.Min_row_interval_ms = 1000
-	cnf.Sensor_server.Tcp_timeout = 10
-	cnf.MQTT_options.Debug = false
-	cnf.MQTT_options.Host = "tcp://localhost:1883"
+	cnf.Sensor_server.Min_row_interval_f = "500ms"
+	cnf.Sensor_server.Tcp_timeout_f = "10s"
+	cnf.MQTT_options.Proto = "tcp"
+	cnf.MQTT_options.Host = "localhost:1883"
 	cnf.MQTT_options.User = ""
 	cnf.MQTT_options.Password = ""
+	cnf.MQTT_options.Client_id = "ssc3"
+	cnf.MQTT_options.Reconnect_f = "30s"
 	channel.Out_id = 1
 	channel.Sub = "/devices/device_id/controls/control_id_1"
-	channel.Saving_interval = 60
+	channel.Saving_interval_f = "60s"
 	cnf.Channels = append(cnf.Channels, channel)
 	channel.Out_id = 2
 	channel.Sub = "/devices/device_id/controls/control_id_2"
-	channel.Saving_interval = 60
+	channel.Saving_interval_f = "60s"
 	cnf.Channels = append(cnf.Channels, channel)
 	data, err := json.MarshalIndent(cnf, "", "\t")
 	if err != nil {
