@@ -37,45 +37,54 @@ func init_db(db_file string) error {
 	return nil
 }
 
-func get_config(f_cnf F_Config) (cnf Config, err error) {
-	cnf.Log = f_cnf.Log
-	cnf.MQTT_options = f_cnf.MQTT_options
-	cnf.Db = f_cnf.Dd
-	cnf.Sensor_server.Debug = f_cnf.Sensor_server.Debug
-	cnf.Sensor_server.Client_id = f_cnf.Sensor_server.Client_id
-	cnf.Sensor_server.Host = f_cnf.Sensor_server.Host
-	cnf.Sensor_server.Row_limit = f_cnf.Sensor_server.Row_limit
-	cnf.Sensor_server.Min_row_interval_ms = time.Duration(f_cnf.Sensor_server.Min_row_interval_ms) * time.Millisecond
-	cnf.Sensor_server.Sending_interval = time.Duration(f_cnf.Sensor_server.Sending_interval) * time.Second
-	cnf.Sensor_server.Tcp_timeout = time.Duration(f_cnf.Sensor_server.Tcp_timeout) * time.Second
-	db, err := sql.Open("sqlite3", cnf.Db.Db_file)
+func (c *Config) Parse_time() error {
+	interval, err := time.ParseDuration(c.MQTT_options.Reconnect_f)
 	if err != nil {
-		return
+		return err
 	}
-	for _, f_ch := range f_cnf.Channels {
-		var ch Channel
-		ch.Id = f_ch.Id
-		ch.Sub = f_ch.Sub
-		ch.Out_id = f_ch.Out_id
-		ch.Saving_interval = time.Duration(f_ch.Saving_interval) * time.Second
+	c.MQTT_options.Reconnect = interval
+	interval, err = time.ParseDuration(c.Sensor_server.Min_row_interval_f)
+	if err != nil {
+		return err
+	}
+	c.Sensor_server.Min_row_interval = interval
+	interval, err = time.ParseDuration(c.Sensor_server.Sending_interval_f)
+	if err != nil {
+		return err
+	}
+	c.Sensor_server.Sending_interval = interval
+	interval, err = time.ParseDuration(c.Sensor_server.Tcp_timeout_f)
+	if err != nil {
+		return err
+	}
+	c.Sensor_server.Tcp_timeout = interval
+	db, err := sql.Open("sqlite3", c.Db.Db_file)
+	if err != nil {
+		return err
+	}
+	for i := 0; i < len(c.Channels); i++ {
+		interval, err := time.ParseDuration(c.Channels[i].Saving_interval_f)
+		if err != nil {
+			return err
+		}
+		c.Channels[i].Saving_interval = interval
 		var id int64
 		sql_query := "SELECT id FROM channels WHERE subscribe=?;"
-		err = db.QueryRow(sql_query, ch.Sub).Scan(&id)
+		err = db.QueryRow(sql_query, c.Channels[i].Sub).Scan(&id)
 		if err != nil {
 			sql_query := "INSERT INTO channels(out_id,subscribe) VALUES (?,?);"
-			res, err := db.Exec(sql_query, ch.Out_id, ch.Sub)
+			res, err := db.Exec(sql_query, c.Channels[i].Out_id, c.Channels[i].Sub)
 			if err != nil {
-				return cnf, err
+				return err
 			}
 			id, err = res.LastInsertId()
 			if err != nil {
-				return cnf, err
+				return err
 			}
 		}
-		ch.Id = int(id)
-		cnf.Channels = append(cnf.Channels, ch)
+		c.Channels[i].Id = int(id)
 	}
-	return cnf, nil
+	return nil
 }
 
 func open_sqlite(db_file string) (*sql.DB, error) {
@@ -164,7 +173,7 @@ func arch_sender(db *sql.DB, cnf Config, ch_in chan Data_value, ch_live_stop cha
 				select {
 				case ch_live_stop <- true:
 					{
-						time.Sleep(time.Duration(len(cnf.Channels)) * cnf.Sensor_server.Min_row_interval_ms)
+						time.Sleep(time.Duration(len(cnf.Channels)) * cnf.Sensor_server.Min_row_interval)
 					}
 				default:
 				}
@@ -194,12 +203,12 @@ func arch_sender(db *sql.DB, cnf Config, ch_in chan Data_value, ch_live_stop cha
 					select {
 					case ch_in <- out:
 						{
-							time.Sleep(time.Duration(2) * cnf.Sensor_server.Min_row_interval_ms)
+							time.Sleep(time.Duration(2) * cnf.Sensor_server.Min_row_interval)
 						}
 					default:
 					}
 				}
-				time.Sleep(time.Duration(5) * cnf.Sensor_server.Min_row_interval_ms)
+				time.Sleep(time.Duration(5) * cnf.Sensor_server.Min_row_interval)
 				select {
 				case ch_live_stop <- false:
 					{
